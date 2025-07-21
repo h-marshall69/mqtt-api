@@ -10,6 +10,15 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 Base = declarative_base()
 
+# Nueva tabla para mensajes MQTT crudos
+class DBRawMQTTData(Base):
+    __tablename__ = "raw_mqtt_data"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    topic = Column(String)
+    payload = Column(String)  # Almacenamos como string JSON
+    timestamp = Column(DateTime, default=datetime.utcnow)
+
 # Tabla: Datos del Sensor
 class DBSensorData(Base):
     __tablename__ = "sensor_data"
@@ -49,6 +58,23 @@ class DBRGBData(Base):
 
 # Crear todas las tablas
 Base.metadata.create_all(bind=engine)
+
+# Nueva función para guardar datos crudos
+def save_raw_mqtt_data(data: dict):
+    db = SessionLocal()
+    try:
+        # Convertimos el payload a string si es un diccionario
+        if isinstance(data.get('payload'), dict):
+            data['payload'] = json.dumps(data['payload'])
+            
+        db_data = DBRawMQTTData(**data)
+        db.add(db_data)
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        print(f"Error saving raw MQTT data: {e}")
+    finally:
+        db.close()
 
 # Funciones de guardado
 def save_sensor_data(data: dict):

@@ -5,7 +5,8 @@ from database import (
     DBSensorData,
     DBAlarmData,
     DBButtonData,
-    DBRGBData
+    DBRGBData,
+    DBRawMQTTData
 )
 from models.schemas import (
     SensorData,
@@ -15,8 +16,22 @@ from models.schemas import (
 )
 from typing import List, Optional
 from datetime import datetime, timedelta
+import json
+from pydantic import BaseModel
 
 router = APIRouter(prefix="/api/v1", tags=["data"])
+
+# Nuevo esquema para datos MQTT crudos
+class RawMQTTData(BaseModel):
+    id: int
+    topic: str
+    payload: dict  # o Any si puede ser de cualquier tipo
+    timestamp: datetime
+
+    class Config:
+        json_encoders = {
+            datetime: lambda v: v.isoformat()
+        }
 
 # --- Dependency: sesión de base de datos ---
 def get_db():
@@ -39,6 +54,68 @@ async def common_filters(
         "start_date": start_date,
         "end_date": end_date
     }
+
+# Nuevo endpoint para datos MQTT crudos
+@router.get("/mqtt/raw/", response_model=List[RawMQTTData])
+def read_raw_mqtt_data(
+    db: Session = Depends(get_db),
+    skip: int = 0,
+    limit: int = Query(100, le=500),
+    topic: Optional[str] = None,
+    start_date: Optional[datetime] = None,
+    end_date: Optional[datetime] = None,
+    search: Optional[str] = None
+):
+    query = db.query(DBRawMQTTData)
+    
+    # Filtros
+    if topic:
+        query = query.filter(DBRawMQTTData.topic.contains(topic))
+    if start_date:
+        query = query.filter(DBRawMQTTData.timestamp >= start_date)
+    if end_date:
+        query = query.filter(DBRawMQTTData.timestamp <= end_date)
+    if search:
+        query = query.filter(DBRawMQTTData.payload.contains(search))
+    
+    results = query.order_by(DBRawMQTTData.timestamp.desc()).offset(skip).limit(limit).all()
+    
+    # Procesar los payloads para convertirlos a dict
+    processed_results = []
+    for item in results:
+        try:
+            payload = json.loads(item.payload) if isinstance(item.payload, str) else item.payload
+        except json.JSONDecodeError:
+            payload = item.payload
+            
+        processed_results.append({
+            "id": item.id,
+            "topic": item.topic,
+            "payload": payload,
+            "timestamp": item.timestamp
+        })
+    
+    return processed_results
+
+# Nuevo endpoint para los últimos N mensajes de un topic específico
+@router.get("/mqtt/topic/{topic}/", response_model=List[RawMQTTData])
+def read_mqtt_topic_data(
+    topic: str,
+    db: Session = Depends(get_db),
+    limit: int = Query(50, le=200)
+):
+    results = db.query(DBRawMQTTData)\
+               .filter(DBRawMQTTData.topic == topic)\
+               .order_by(DBRawMQTTData.timestamp.desc())\
+               .limit(limit)\
+               .all()
+    
+    return [{
+        "id": item.id,
+        "topic": item.topic,
+        "payload": json.loads(item.payload) if isinstance(item.payload, str) else item.payload,
+        "timestamp": item.timestamp
+    } for item in results]
 
 # --- Endpoint: Sensor Data ---
 @router.get("/sensors/", response_model=List[SensorData])
@@ -146,3 +223,47 @@ def get_system_stats(db: Session = Depends(get_db)):
                       .first()[0] if db.query(DBAlarmData).count() > 0 else None
     }
     return stats
+
+@router.get("/mqtt/analysis/")
+def get_mqtt_analysis(db: Session = Depends(get_db)):
+    """Análisis de patrones en los datos MQTT"""
+    
+    # Contar mensajes por topic
+    topics_stats = db.query(
+        DBRawMQTTData.topic,
+        db.func.count(DBRawMQTTData.id).label('count')
+    ).group_by(DBRawMQTTData.topic).all()
+    
+    # Últimos 24 horas de actividad
+    last_24h = datetime.utcnow() - timedelta(hours=24)
+    recent_activity = db.query(DBRawMQTTData)\
+                       .filter(DBRawMQTTData.timestamp >= last_24h)\
+                       .count()
+    
+    # Topics únicos
+    unique_topics = db.query(DBRawMQTTData.topic).distinct().all()
+    
+    return {
+        "total_messages": db.query(DBRawMQTTData).count(),
+        "unique_topics": [t[0] for t in unique_topics],
+        "messages_by_topic": {t.topic: t.count for t in topics_stats},
+        "last_24h_messages": recent_activity,
+        "most_active_topic": max(topics_stats, key=lambda x: x.count).topic if topics_stats else None
+    }
+
+
+@router.get("/mqtt/unknown-topics/")
+def get_unknown_topics(db: Session = Depends(get_db)):
+    """Encuentra topics que no están siendo procesados específicamente"""
+    
+    known_topics = ["esp32/sensors", "esp32/alarms", "esp32/button", "esp32/rgb"]
+    
+    unknown = db.query(DBRawMQTTData.topic)\
+               .filter(~DBRawMQTTData.topic.in_(known_topics))\
+               .distinct()\
+               .all()
+    
+    return {
+        "unknown_topics": [t[0] for t in unknown],
+        "suggestion": "Consider adding specific handlers for these topics"
+    }
