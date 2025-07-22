@@ -1,15 +1,16 @@
 import paho.mqtt.client as mqtt
+import requests
 from database import (
-    save_sensor_data,
-    save_alarm_data,
-    save_button_data,
-    save_rgb_data,
+    save_mediciones_data,
     save_raw_mqtt_data
 )
 import json
 import os
 from datetime import datetime
 from typing import Dict, Any
+
+# Configuración
+API_ENDPOINT = os.getenv("API_ENDPOINT", "http://3.142.136.76:8000/api/v1/pacientes/identificador/")
 
 # Configuración MQTT - Usar variables de entorno para credenciales
 MQTT_BROKER = os.getenv("MQTT_BROKER", "3.142.136.76")
@@ -19,12 +20,20 @@ MQTT_PASSWORD = os.getenv("MQTT_PASSWORD", "abadeer")
 MQTT_CLIENT_ID = os.getenv("MQTT_CLIENT_ID", f"python_client_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
 
 TOPICS = [
-    "esp32/sensors",
-    "esp32/alarms", 
-    "esp32/button",
-    "esp32/rgb",
+    "esp32/mediciones",
     "esp32/#"  # Wildcard para capturar todo
 ]
+
+def get_paciente_id():
+    """Consulta el endpoint para obtener el ID de paciente"""
+    try:
+        response = requests.get(API_ENDPOINT)
+        if response.status_code == 200:
+            return response.json().get('identificador')
+        return None
+    except Exception as e:
+        print(f"Error consultando endpoint: {str(e)}")
+        return None
 
 def parse_timestamp(payload: Dict[str, Any]) -> Dict[str, Any]:
     """Asegura que el timestamp esté en el formato correcto"""
@@ -82,9 +91,11 @@ def on_message(client, userdata, msg):
             payload_type = "text"
             print(f"ℹ️  Treating as text: {payload}")
         
+        identificador = get_paciente_id()
         # Guardar SIEMPRE el mensaje crudo
         raw_data = {
             "topic": msg.topic,
+            "paciente_id": identificador,
             "payload": json.dumps(payload) if payload_type == "json" else payload,
             "timestamp": datetime.utcnow().isoformat()
         }
@@ -94,22 +105,23 @@ def on_message(client, userdata, msg):
             print(f"💾 Saved raw data to database")
         except Exception as db_error:
             print(f"❌ Error saving raw data: {db_error}")
-        
+
+
         # Procesar datos específicos si son JSON válido
         if payload_type == "json":
             try:
-                if msg.topic == "esp32/sensors":
-                    save_sensor_data(payload)
-                    print(f"💾 Saved sensor data")
-                elif msg.topic == "esp32/alarms":
-                    save_alarm_data(payload) 
-                    print(f"💾 Saved alarm data")
-                elif msg.topic == "esp32/button":
-                    save_button_data(payload)
-                    print(f"💾 Saved button data")
-                elif msg.topic == "esp32/rgb":
-                    save_rgb_data(payload)
-                    print(f"💾 Saved RGB data")
+                if msg.topic == "esp32/mediciones":
+                    if not identificador:
+                        print("⚠️ No se pudo obtener paciente_id")
+                        return
+
+                    datos_completos = {
+                        **payload,
+                        "paciente_identificador": identificador,
+                        "timestamp": datetime.utcnow().isoformat()
+                    }
+                    save_mediciones_data(datos_completos)
+                    print(f"💾 Saved mediciones data Abadeer")
             except Exception as parse_error:
                 print(f"⚠️  Error saving parsed data: {parse_error}")
             
