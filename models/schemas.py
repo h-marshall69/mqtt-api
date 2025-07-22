@@ -3,6 +3,7 @@ from typing import Optional
 from datetime import datetime
 
 class SensorData(BaseModel):
+    sensor: str
     temperature: float
     humidity: float
     light: Optional[float] = None

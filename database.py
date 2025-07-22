@@ -10,7 +10,7 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 Base = declarative_base()
 
-# Nueva tabla para mensajes MQTT crudos
+# Tabla: Mensajes MQTT crudos
 class DBRawMQTTData(Base):
     __tablename__ = "raw_mqtt_data"
     
@@ -24,9 +24,9 @@ class DBSensorData(Base):
     __tablename__ = "sensor_data"
     
     id = Column(Integer, primary_key=True, index=True)
+    sensor = Column(String, nullable=True)  # Nuevo
     temperature = Column(Float)
     humidity = Column(Float)
-    light = Column(Float, nullable=True)
     timestamp = Column(DateTime, default=datetime.utcnow)
 
 # Tabla: Datos de la Alarma
@@ -61,26 +61,43 @@ Base.metadata.create_all(bind=engine)
 
 # Nueva función para guardar datos crudos
 def save_raw_mqtt_data(data: dict):
-    db = SessionLocal()
+    """Guarda datos MQTT crudos en la base de datos"""
     try:
-        # Convertimos el payload a string si es un diccionario
-        if isinstance(data.get('payload'), dict):
-            data['payload'] = json.dumps(data['payload'])
+        db = SessionLocal()
+        
+        # Convertir payload a string si es dict
+        payload_str = data['payload']
+        if isinstance(payload_str, dict):
+            payload_str = json.dumps(payload_str)
             
-        db_data = DBRawMQTTData(**data)
-        db.add(db_data)
+        raw_data = DBRawMQTTData(
+            topic=data['topic'],
+            payload=payload_str,
+            timestamp=datetime.fromisoformat(data['timestamp']) if isinstance(data['timestamp'], str) else data['timestamp']
+        )
+        
+        db.add(raw_data)
         db.commit()
+        print(f"✅ Raw MQTT data saved: {data['topic']}")
+        
     except Exception as e:
-        db.rollback()
-        print(f"Error saving raw MQTT data: {e}")
+        print(f"❌ Error saving raw MQTT data: {e}")
+        if db:
+            db.rollback()
     finally:
-        db.close()
+        if db:
+            db.close()
 
 # Funciones de guardado
 def save_sensor_data(data: dict):
     db = SessionLocal()
     try:
-        db_data = DBSensorData(**data)
+        db_data = DBSensorData(
+            sensor=data.get('sensor'),
+            temperature=data.get('temperature'),
+            humidity=data.get('humidity'),
+            timestamp = datetime.fromtimestamp(data['timestamp']) if 'timestamp' in data else datetime.utcnow()
+        )
         db.add(db_data)
         db.commit()
     finally:
